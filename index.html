@@ -447,27 +447,19 @@ async function run(){
     if(r.volatilityVeryHigh) volatilityMessage = "Very high volatility — avoid trade";
 
     result.innerHTML = `
-      <div class="card">
-
-        <table>
-         
-          <tr><td>Coin</td><td>${product}</td></tr>
-          <tr><td>Live Price</td><td>${price.toFixed(4)} <span class="warn">Coinbase</span></td></tr>
-          <tr><td>Target Price</td><td>${target.toFixed(2)}</td></tr>
-          <tr><td>Projected Resolve Avg</td><td class="info">${r.projectedAvg.toFixed(4)}</td></tr>
-          <tr><td>Time Left</td><td>${r.timeLeft.toFixed(1)} min</td></tr>
-        </table>
-
-        <br>
-
       
+ <div class="card">
 
+<b>Coin:</b> ${product}<br>
+ <b>Price:</b>&nbsp&nbsp&nbsp&nbsp&nbsp&nbsp&nbsp&nbsp ${price.toFixed(4)} <span class="warn">(Coinbase)</span><br>
+ <b>Target:</b>&nbsp&nbsp&nbsp&nbsp&nbsp&nbsp ${target.toFixed(4)}<br>
+<b>Projected:</b> <td class="info">${r.projectedAvg.toFixed(4)}<br>
+ <b>Time:</b> ${r.timeLeft.toFixed(1)} min<br><br>
 
+    
  <b>YES:</b> ${(r.yes * 100).toFixed(1)}%<br>
  <b>NO:</b> ${(r.no * 100).toFixed(1)}%<br><br>
        
-
-        <br>
 
         <b class="conf">Confidence:</b> ${r.confidence}%<br>
         <b>Timing:</b> ${r.timing}<br><br>
