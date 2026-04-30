@@ -482,7 +482,8 @@ async function run(){
 
  
 
-
+         <h2 class="${r.cls}">${r.decision}</h2>
+         
         <table>
           <tr><th>Trend Status:</th><th>Prices:</th></tr>
           <tr><td>5m Trend: ${r.trend5Positive ? "Positive" : "Negative"} (${r.trend5.toFixed(4)})</td><td>${p5.toFixed(4)}</td></tr>
@@ -491,7 +492,7 @@ async function run(){
           
         </table>
 
-        <h2 class="${r.cls}">${r.decision}</h2>
+       
 
         <div class="info">
           <b>Why:</b><br>
