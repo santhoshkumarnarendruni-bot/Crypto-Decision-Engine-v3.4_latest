@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crypto Decision Engine v3.4 - Manual Target + Strict Avg Cushion</title>
+
+<style>
+  body {
+    background:#0b0f14;
+    color:white;
+    font-family:Arial, sans-serif;
+    padding:15px;
+    max-width:760px;
+    margin:auto;
+  }
+
+  h2 { margin-bottom:8px; }
+
+  .sub {
+    color:#aaa;
+    font-size:13px;
+    line-height:1.4;
+  }
+
+  select,input,button {
+    width:100%;
+    box-sizing:border-box;
+    padding:12px;
+    margin-top:10px;
+    border-radius:8px;
+    border:1px solid #2b3643;
+    background:#101820;
+    color:white;
+    font-size:15px;
+  }
+
+  button {
+    background:#2ecc71;
+    border:none;
+    color:white;
+    font-weight:bold;
+    cursor:pointer;
+  }
+
+  .card {
+    background:#151c24;
+    padding:15px;
+    margin-top:15px;
+    border-radius:10px;
+    line-height:1.55;
+  }
+
+  table {
+    width:100%;
+    border-collapse:collapse;
+    margin-top:10px;
+  }
+
+  td, th {
+    border-bottom:1px solid #2b3643;
+    padding:8px;
+    text-align:left;
+  }
+
+  th {
+    color:#f1c40f;
+  }
+
+  .yes { color:#2ecc71; font-weight:bold; }
+  .no { color:#e74c3c; font-weight:bold; }
+  .skip { color:#aaa; font-weight:bold; }
+  .info { color:#f1c40f; }
+  .conf { color:#3498db; font-weight:bold; }
+  .warn { color:#f39c12; font-weight:bold; }
+  .small { font-size:12px; color:#aaa; }
+  .conf1 { color:#3498db; }
+ 
+  .probRow {
+    display:flex;
+    justify-content:space-between;
+    gap:25px;
+    font-size:18px;
+  }
+</style>
+</head>
+
+<body>
+
+<h2>Crypto Decision Engine v3.4</h2>
+
+
+
+<select id="coin">
+  <option value="BTC-USD">BTC</option>
+  <option value="ETH-USD">ETH</option>
+  <option value="SOL-USD">SOL</option>
+  <option value="XRP-USD">XRP</option>
+  <option value="DOGE-USD">DOGE</option>
+  <option value="BNB-USD">BNB</option>
+  <option value="HYPE-USD">HYPE</option>
+</select>
+
+<input id="target" type="number" step="0.01" placeholder="Enter target price manually">
+<input id="market" type="number" step="0.01" min="0" max="1" placeholder="Market YES probability optional, example 0.62">
+
+<button onclick="run()">Analyze</button>
+
+<div id="result"></div>
+
+<script>
+function $(id){
+  return document.getElementById(id);
+}
+
+async function fetchJson(url){
+  const res = await fetch(url, { cache: "no-store" });
+  if(!res.ok) throw new Error("HTTP " + res.status + " for " + url);
+  return await res.json();
+}
+
+function candleFromArray(c){
+  return {
+    time: Number(c[0]) * 1000,
+    low: Number(c[1]),
+    high: Number(c[2]),
+    open: Number(c[3]),
+    close: Number(c[4]),
+    volume: Number(c[5])
+  };
+}
+
+function ohlc4(c){
+  return (Number(c.open) + Number(c.high) + Number(c.low) + Number(c.close)) / 4;
+}
+
+function getNextBoundaryMs(){
+  const fifteen = 15 * 60 * 1000;
+  return Math.floor(Date.now() / fifteen) * fifteen + fifteen;
+}
+
+function getTimeLeftMin(){
+  return Math.max(0, (getNextBoundaryMs() - Date.now()) / 60000);
+}
+
+async function getTicker(product){
+  const data = await fetchJson(`https://api.exchange.coinbase.com/products/${product}/ticker`);
+  if(!data.price) throw new Error("Ticker unavailable for " + product);
+  return Number(data.price);
+}
+
+async function getCandles(product, granularity = 60){
+  const url = `https://api.exchange.coinbase.com/products/${product}/candles?granularity=${granularity}`;
+  const data = await fetchJson(url);
+
+  if(!Array.isArray(data) || data.length === 0){
+    throw new Error("No candle data for " + product);
+  }
+
+  return data.map(candleFromArray).sort((a,b) => a.time - b.time);
+}
+
+function getPriceAgo(candles, mins){
+  const t = Date.now() - mins * 60000;
+  return candles.reduce((prev, curr) =>
+    Math.abs(curr.time - t) < Math.abs(prev.time - t) ? curr : prev
+  ).close;
+}
+
+function RSI(closes){
+  let gain = 0;
+  let loss = 0;
+
+  for(let i = 1; i < closes.length; i++){
+    const diff = closes[i] - closes[i - 1];
+    if(diff > 0) gain += diff;
+    else loss -= diff;
+  }
+
+  const rs = gain / (loss || 1);
+  return 100 - (100 / (1 + rs));
+}
+
+function VOL(closes){
+  let total = 0;
+
+  for(let i = 1; i < closes.length; i++){
+    total += Math.abs(closes[i] - closes[i - 1]);
+  }
+
+  return total / Math.max(1, closes.length - 1);
+}
+
+function analyzeEngine({price, target, market, rsi, vol, p5, p10, p15, latestAvg}){
+  const timeLeft = getTimeLeftMin();
+
+  const trend5 = price - p5;
+  const trend10 = price - p10;
+  const trend15 = price - p15;
+
+  const trend5Positive = trend5 > 0;
+  const trend10Positive = trend10 > 0;
+  const trend15Positive = trend15 > 0;
+
+  const volatilityPct = vol / price;
+  const volatilityHigh = volatilityPct > 0.0018;
+  const volatilityVeryHigh = volatilityPct > 0.003;
+
+  /*
+    Prediction is based on projected resolving average, not live price alone.
+    This is still an approximation using Coinbase public 1-minute candle data.
+  */
+  const urgency = Math.max(0, Math.min(1, 1 - (timeLeft / 15)));
+  const trendProjection = (trend5 * 0.50) + (trend10 * 0.30) + (trend15 * 0.20);
+
+  const projectedAvg =
+    (latestAvg * (0.70 + urgency * 0.20)) +
+    (price * (0.30 - urgency * 0.20)) +
+    (trendProjection * 0.15);
+
+  const avgDistance = Math.abs(projectedAvg - target);
+  const cushionThreshold = vol * 1.5;
+  const avgCushion = projectedAvg - target;
+
+  let yes = 0.50;
+  let confidence = 50;
+  const reasons = [];
+  const warnings = [];
+
+  if(projectedAvg > target){
+    yes += 0.18;
+    confidence += 12;
+    reasons.push("Projected 60-sec average is above target → YES advantage");
+  } else {
+    yes -= 0.18;
+    confidence += 12;
+    reasons.push("Projected 60-sec average is below target → NO advantage");
+  }
+
+  if(latestAvg > target){
+    yes += 0.10;
+    confidence += 8;
+    reasons.push("Latest 1-min average is already above target");
+  } else {
+    yes -= 0.10;
+    confidence += 8;
+    reasons.push("Latest 1-min average is below target");
+  }
+
+  if(price > target){
+    yes += 0.07;
+    reasons.push("Live Coinbase price is above target");
+  } else {
+    yes -= 0.07;
+    reasons.push("Live Coinbase price is below target");
+  }
+
+  if(trend5Positive && trend10Positive){
+    yes += 0.08;
+    confidence += 10;
+    reasons.push("5m and 10m trend support YES");
+  }
+
+  if(!trend5Positive && !trend10Positive){
+    yes -= 0.08;
+    confidence += 10;
+    reasons.push("5m and 10m trend support NO");
+  }
+
+  if((trend5 > 0 && trend10 < 0) || (trend5 < 0 && trend10 > 0)){
+    confidence -= 18;
+    warnings.push("Mixed 5m/10m trend → unstable direction");
+  }
+
+  if(rsi < 30){
+    yes += 0.05;
+    confidence += 5;
+    reasons.push("RSI oversold, possible upward bounce");
+  }
+
+  if(rsi > 70){
+    yes -= 0.05;
+    confidence += 5;
+    reasons.push("RSI overbought, possible pullback");
+  }
+
+  if(rsi >= 45 && rsi <= 55){
+    confidence -= 8;
+    reasons.push("RSI neutral → weak momentum");
+  }
+
+  if(!isNaN(market) && market >= 0 && market <= 1){
+    yes = (0.75 * yes) + (0.25 * market);
+    reasons.push("Adjusted using entered market YES probability");
+  }
+
+  if(volatilityHigh){
+    confidence -= 15;
+    warnings.push("High volatility → target can flip quickly");
+  }
+
+  if(volatilityVeryHigh){
+    confidence -= 25;
+    warnings.push("Very high volatility → avoid unless signal is very strong");
+  }
+
+  const tooClose = avgDistance < vol * 1.0;
+
+  if(tooClose){
+    confidence -= 25;
+    warnings.push("Projected average is too close to target → flip risk");
+  }
+
+  if(timeLeft > 6 && volatilityHigh){
+    confidence -= 10;
+    warnings.push("More than 6 min left + high volatility → wait");
+  }
+
+  if(timeLeft <= 2){
+    confidence += 8;
+    reasons.push("Low time left → current average has more importance");
+  }
+
+  yes = Math.max(0.05, Math.min(0.95, yes));
+  const no = 1 - yes;
+  confidence = Math.max(0, Math.min(100, Math.round(confidence)));
+
+  let cushionSignal = "NO CUSHION SIGNAL";
+  let cushionClass = "skip";
+  let cushionReason = "Projected 60-sec average does not have enough safe distance from target.";
+
+  if(avgCushion >= cushionThreshold && yes > 0.60 && trend5Positive && trend10Positive){
+    cushionSignal = "AVG CUSHION SIGNAL: BET YES";
+    cushionClass = "yes";
+    cushionReason = "Projected 60-sec average has strong cushion above target + trend positive.";
+  } else if(avgCushion <= -cushionThreshold && no > 0.60 && !trend5Positive && !trend10Positive){
+    cushionSignal = "AVG CUSHION SIGNAL: BET NO";
+    cushionClass = "no";
+    cushionReason = "Projected 60-sec average has strong cushion below target + trend negative.";
+  } else if(Math.abs(avgCushion) < cushionThreshold){
+    cushionSignal = "WEAK AVG CUSHION: SKIP / WAIT";
+    cushionClass = "skip";
+    cushionReason = "Projected average is within volatility cushion. One move can flip result.";
+  }
+
+  let decision = "SKIP";
+  let cls = "skip";
+  let timing = confidence >= 70 ? "ENTER ONLY IF PRICE/AVG HOLDS" : "WAIT";
+
+  /*
+    Strict entry rules added:
+    1) Confidence must be at least 60.
+    2) YES/NO must be at least 68%.
+    3) Projected average cushion must agree with the direction.
+    4) Avoid if projected average is too close or volatility is very high.
+  */
+  if(confidence < 60 || volatilityVeryHigh || tooClose){
+    decision = "SKIP";
+    timing = "AVOID / WAIT";
+  } else if(yes >= 0.68 && avgCushion >= cushionThreshold){
+    decision = "BET YES";
+    cls = "yes";
+  } else if(no >= 0.68 && avgCushion <= -cushionThreshold){
+    decision = "BET NO";
+    cls = "no";
+  } else {
+    decision = "SKIP";
+    timing = "WAIT";
+  }
+
+  return {
+    yes,
+    no,
+    confidence,
+    decision,
+    cls,
+    timing,
+    reasons,
+    warnings,
+    trend5,
+    trend10,
+    trend15,
+    trend5Positive,
+    trend10Positive,
+    trend15Positive,
+    volatilityPct,
+    volatilityHigh,
+    volatilityVeryHigh,
+    latestAvg,
+    projectedAvg,
+    cushionThreshold,
+    avgCushion,
+    cushionSignal,
+    cushionClass,
+    cushionReason,
+    timeLeft
+  };
+}
+
+async function run(){
+  const product = $("coin").value;
+  const target = Number($("target").value);
+  const market = Number($("market").value);
+  const result = $("result");
+
+  if(!target || isNaN(target)){
+    alert("Enter target price manually");
+    return;
+  }
+
+  result.innerHTML = `<div class="card">Loading Coinbase data...</div>`;
+
+  try{
+    const candles = await getCandles(product, 60);
+
+    if(candles.length < 20){
+      throw new Error("Not enough candles");
+    }
+
+    const price = await getTicker(product);
+    const closes = candles.slice(-30).map(c => c.close);
+
+    const rsi = RSI(closes);
+    const vol = VOL(closes);
+
+    const p5 = getPriceAgo(candles, 5);
+    const p10 = getPriceAgo(candles, 10);
+    const p15 = getPriceAgo(candles, 15);
+
+    const latest = candles[candles.length - 1];
+    const latestAvg = ohlc4(latest);
+
+    const r = analyzeEngine({
+      price,
+      target,
+      market,
+      rsi,
+      vol,
+      p5,
+      p10,
+      p15,
+      latestAvg
+    });
+
+    let volatilityMessage = "Normal volatility";
+    if(r.volatilityHigh) volatilityMessage = "High volatility — trade carefully";
+    if(r.volatilityVeryHigh) volatilityMessage = "Very high volatility — avoid trade";
+
+    result.innerHTML = `
+      <div class="card">
+
+        <table>
+         
+          <tr><td>Coin</td><td>${product}</td></tr>
+          <tr><td>Live Price</td><td>${price.toFixed(4)} <span class="warn">Coinbase</span></td></tr>
+          <tr><td>Target Price</td><td>${target.toFixed(2)}</td></tr>
+          <tr><td>Projected Resolve Avg</td><td class="info">${r.projectedAvg.toFixed(4)}</td></tr>
+          <tr><td>Time Left</td><td>${r.timeLeft.toFixed(1)} min</td></tr>
+        </table>
+
+        <br>
+
+      
+
+
+ <b>YES:</b> ${(r.yes * 100).toFixed(1)}%<br>
+ <b>NO:</b> ${(r.no * 100).toFixed(1)}%<br><br>
+       
+
+        <br>
+
+        <b class="conf">Confidence:</b> ${r.confidence}%<br>
+        <b>Timing:</b> ${r.timing}<br><br>
+
+        <b>Volatility:</b> ${vol.toFixed(4)} &nbsp;&nbsp;
+        <span class="warn">${volatilityMessage}</span><br>
+
+        <b>RSI:</b> ${rsi.toFixed(2)}<br><br>
+
+        <b class="${r.cushionClass}">${r.cushionSignal}</b><br>
+        <span class="small">${r.cushionReason}</span><br><br>
+
+ 
+
+
+        <table>
+          <tr><th>Trend Status:</th><th>Prices:</th></tr>
+          <tr><td>5m Trend: ${r.trend5Positive ? "Positive" : "Negative"} (${r.trend5.toFixed(4)})</td><td>${p5.toFixed(4)}</td></tr>
+          <tr><td>10m Trend: ${r.trend10Positive ? "Positive" : "Negative"} (${r.trend10.toFixed(4)})</td><td>${p10.toFixed(4)}</td></tr>
+          <tr><td>15m Trend: ${r.trend15Positive ? "Positive" : "Negative"} (${r.trend15.toFixed(4)})</td><td>${p15.toFixed(4)}</td></tr>
+          
+        </table>
+
+        <h2 class="${r.cls}">${r.decision}</h2>
+
+        <div class="info">
+          <b>Why:</b><br>
+          ${r.reasons.join("<br>") || "No strong reason."}
+          <br><br>
+          <b>Risk Warnings:</b><br>
+          ${r.warnings.length ? r.warnings.join("<br>") : "No major warning"}
+        </div>
+
+        <br>
+
+      
+        
+      </div>
+    `;
+
+  } catch(e){
+    console.error(e);
+
+    result.innerHTML = `
+      <div class="card">
+        <b class="no">Coinbase API Error</b><br><br>
+        ${e.message}<br><br>
+        <span class="small">
+          Try BTC-USD/ETH-USD first. Some coins may not exist on Coinbase Exchange.
+          If this fails only on laptop browser, try disabling extensions, using HTTPS hosting, or using another browser.
+        </span>
+      </div>
+    `;
+  }
+}
+
+/*
+  Important:
+  Auto target refresh on coin change has been removed.
+  When coin changes, only clear output and keep target manual.
+*/
+window.addEventListener("DOMContentLoaded", function(){
+  $("coin").addEventListener("change", function(){
+    $("result").innerHTML = "";
+    $("market").value = "";
+    // Target is intentionally NOT auto-populated.
+    // You can choose to keep or clear the target.
+    // Current behavior clears it to avoid using old coin target by mistake.
+    $("target").value = "";
+  });
+});
+</script>
+
+</body>
+</html>
